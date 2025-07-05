@@ -11,8 +11,10 @@
 #include <unistd.h> // for fork(), exit() sys calls
 #include <errno.h> // errno global var for perror()
 
-#define PORT "8008"
+#define PORT "8008" 
 #define BACKLOG 10
+
+#define BUFSIZE 4096 // size of buffer for recv()
 
 // runs at the end of every child process
 void sigchld_handler(int s)
@@ -57,6 +59,88 @@ void *get_in_addr(struct sockaddr *sa)
         return &(((struct sockaddr_in*)sa)->sin_addr);
     }
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+// ignore other request headers for now
+struct httprequest {
+    char *method;
+    char *target;
+    char *protocol_ver;
+    char *body;
+};
+
+// return -1 if request is not properly formatted
+int parse_request(struct httprequest *req, char *buf, int len) {
+    char *method, *target, *protocol_ver, *buf_p = buf;
+
+    if ((method = strsep(&buf_p, " ")) == NULL) 
+        return -1;
+    if ((target = strsep(&buf_p, " ")) == NULL) 
+        return -1;
+    if ((protocol_ver = strsep(&buf_p, "\n")) == NULL) 
+        return -1;
+
+    req->method = strdup(method);
+    req->target = strdup(target);
+    req->protocol_ver = strdup(protocol_ver);
+
+    printf("METHOD: %s\nTARGET: %s\nPROTOCOL VER: %s\n", req->method, req->target, req->protocol_ver);
+
+    // strsep delimiters are only single byte, so we can't split by "\r\n"
+    char *token;
+    while (strcmp(token = strsep(&buf_p, "\n"), "\r") != 0)
+        printf(" Header: %s\n", token);
+
+    req->body = strdup(strsep(&buf_p, "\n"));
+
+    printf(" Body: %s\n", req->body);
+
+    return 0;
+}
+
+void freehttprequest(struct httprequest *req) {
+    free(req->method);
+    free(req->target);
+    free(req->protocol_ver);
+    free(req->body);
+}
+
+int handle_client(int sockfd) {
+    char buf[BUFSIZE], *resp;
+    int buf_size;
+    struct httprequest req;
+
+    memset(&req, 0, sizeof req);
+
+    if ((buf_size = recv(sockfd, buf, sizeof buf, 0)) == -1) {
+        perror("recv");
+        return -1;
+    }
+
+    if (buf_size == 0) 
+        // client closed the connection
+        return -1;
+        
+    buf[buf_size] = '\0';
+
+    // TODO: 200 and 400 response should contain content from a files in /root (400 from special error file)
+    char *get_resp = "HTTP 1.0 200 OK\r\nContext-type: text/html\r\nContent-Length: 48\r\n\r\n<html><body><h1>Hello, world!</h1></body></html>";
+    char *err_resp = "HTTP 1.0 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 77\r\n\r\n{'error':'Bad request','message':'Request body could not be read properly.',}";
+    char *unimpl_resp = "HTTP 1.0 501 Not Implemented";
+
+    if (parse_request(&req, buf, buf_size) == -1)
+        resp = err_resp;
+    else
+        resp = strcmp(req.method, "GET") == 0 ? get_resp : unimpl_resp;
+
+    if (send(sockfd, resp, strlen(resp), 0) == -1) {
+        perror("send");
+        return -1;
+    }
+    
+    freehttprequest(&req);
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) 
@@ -112,8 +196,6 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    char *resp = "HTTP/1.1 200 OK\r\nContext-type: text/html\r\nContent-Length: 48\r\n\r\n<html><body><h1>Hello, World!</h1></body></html>";
-
     printf("server: waiting for connections...\n");
 
     while (1) {
@@ -130,9 +212,7 @@ int main(int argc, char *argv[])
 
         if (!fork()) { // in child process
             close(sockfd);
-            if (send(new_fd, resp, strlen(resp), 0) == -1) {
-                perror("send");
-            }
+            handle_client(new_fd); 
             close(new_fd);
             exit(0);
         }
