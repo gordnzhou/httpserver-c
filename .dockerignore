@@ -1,1 +1,14 @@
-src/main
+.DS_Store
+Thumbs.db
+
+# build artifacts + dependency files
+build/
+*.o
+*.obj
+*.exe
+*.out
+*.d
+
+# git stuff
+.git
+.gitignore

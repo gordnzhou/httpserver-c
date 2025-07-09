@@ -17,7 +17,7 @@
 #define BACKLOG 10
 #define RECV_BUFSIZE 4096
 
-#define ROOT_DIR "../root"
+#define ROOT_DIR "root"
 #define HTTP_VER "1.0"
 
 // runs at the end of every child process

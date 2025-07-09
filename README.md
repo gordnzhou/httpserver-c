@@ -2,9 +2,9 @@
 
 ### Docker commands
 ```bash
-# build container
-docker build -t http_server .
+# build image
+./scripts/docker.sh build
 
 # run container on port 8008
-docker run --rm -it --name="httpserver-c" -w="/httpserver-c" -p 8008:8008 http_server 
+./scripts/docker.sh
 ```

@@ -6,8 +6,8 @@ WORKDIR /httpserver-c
 
 COPY . .
 
-RUN make -C src
+RUN make
 
-CMD ["./src/main"]
+CMD ["make", "run"]
 
 EXPOSE 8008
