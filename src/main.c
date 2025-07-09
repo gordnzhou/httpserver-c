@@ -10,11 +10,15 @@
 #include <signal.h> // for sigaction functions
 #include <unistd.h> // for fork(), exit() sys calls
 #include <errno.h> // errno global var for perror()
+#include <fcntl.h> // for file sys calls
+#include <assert.h>
 
 #define PORT "8008" 
 #define BACKLOG 10
+#define RECV_BUFSIZE 4096
 
-#define BUFSIZE 4096 // size of buffer for recv()
+#define ROOT_DIR "../root"
+#define HTTP_VER "1.0"
 
 // runs at the end of every child process
 void sigchld_handler(int s)
@@ -37,7 +41,7 @@ void printalladdr(struct addrinfo **servinfo)
 
     struct addrinfo *p;
     for (struct addrinfo *p = *servinfo; p; p = p->ai_next) {
-        // flexibility for both ipv4 and ipv6
+
         if (p->ai_family == AF_INET) {
             ipv4 = (struct sockaddr_in*)p->ai_addr;
             addr = &(ipv4->sin_addr);
@@ -67,35 +71,41 @@ struct httprequest {
     char *target;
     char *protocol_ver;
     char *body;
+    int  is_valid;  // 0 if request is improperly formatted
 };
 
-// return -1 if request is not properly formatted
-int parse_request(struct httprequest *req, char *buf, int len) {
+void httprequest(struct httprequest *req, char *buf, int len) {
     char *method, *target, *protocol_ver, *buf_p = buf;
+    req->is_valid = 1;
 
     if ((method = strsep(&buf_p, " ")) == NULL) 
-        return -1;
+        req->is_valid = 0;
     if ((target = strsep(&buf_p, " ")) == NULL) 
-        return -1;
+        req->is_valid = 0;
     if ((protocol_ver = strsep(&buf_p, "\n")) == NULL) 
-        return -1;
+        req->is_valid = 0;
+
+    if (!req->is_valid)
+        return;
 
     req->method = strdup(method);
     req->target = strdup(target);
     req->protocol_ver = strdup(protocol_ver);
 
-    printf("METHOD: %s\nTARGET: %s\nPROTOCOL VER: %s\n", req->method, req->target, req->protocol_ver);
+    printf("METHOD: %s, TARGET: %s, PROTOCOL VER: %s\n", req->method, req->target, req->protocol_ver);
 
     // strsep delimiters are only single byte, so we can't split by "\r\n"
     char *token;
-    while (strcmp(token = strsep(&buf_p, "\n"), "\r") != 0)
-        printf(" Header: %s\n", token);
+    while (strcmp(token = strsep(&buf_p, "\n"), "\r") != 0) {
+        char *key = strsep(&token, ":");
+        char *value = token + 1;
+
+        // printf(" HEADER key: %s, value: %s\n", key, value);
+    }
 
     req->body = strdup(strsep(&buf_p, "\n"));
 
-    printf(" Body: %s\n", req->body);
-
-    return 0;
+    // printf(" Body: %s\n", req->body);
 }
 
 void freehttprequest(struct httprequest *req) {
@@ -105,12 +115,119 @@ void freehttprequest(struct httprequest *req) {
     free(req->body);
 }
 
+ssize_t file_size(int fd) {
+    ssize_t size = lseek(fd, 0, SEEK_END);
+
+    if (lseek(fd, 0, SEEK_SET) == -1) {
+        perror("lseek reset");
+        return -1;
+    }
+
+    return size;
+}
+
+int httpresponse(void **resp, size_t *resp_size, struct httprequest *req) {
+    char *bad_resp = "HTTP 1.0 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 77\r\n\r\n{'error':'Bad request','message':'Request body could not be read properly.',}";
+    char *unimpl_resp = "HTTP 1.0 501 Not Implemented";
+    char *not_found_resp = "HTTP 1.0 404 Not Found";
+
+    if (!req->is_valid) {
+        *resp_size = (size_t) strlen(bad_resp);
+        *resp = strdup(bad_resp);
+        return 0;
+    }
+
+    if (strcmp(req->method, "GET") != 0) {
+        *resp_size = (size_t) strlen(unimpl_resp);
+        *resp = strdup(unimpl_resp);
+        return 0;
+    }
+
+    if (strcmp(req->target, "/") == 0)
+        strcpy(req->target, "/index.html");
+
+    char file_path[2048];
+    int fd;
+    ssize_t file_bytes, read_bytes;
+    unsigned char *file_buf;
+
+    // TODO: prevent file access outside of ROOT_DIR (no "..")
+    sprintf(file_path, "%s%s", ROOT_DIR, req->target);
+
+    if ((fd = open(file_path, O_RDONLY)) == -1) {
+        perror("file open");
+        *resp_size = (size_t) strlen(not_found_resp);
+        *resp = strdup(not_found_resp);
+        return 0;
+    }
+
+    if ((file_bytes = file_size(fd)) == -1) {
+        perror("file size");
+        close(fd);
+        return -1;
+    }
+
+    file_buf = malloc(file_bytes);
+    if (!file_buf) {
+        perror("malloc");
+        close(fd);
+        return -1;
+    }
+
+    if ((read_bytes = read(fd, file_buf, file_bytes)) == -1 || file_bytes != read_bytes) {
+        perror("file read");
+        free(file_buf);
+        close(fd);
+        return -1;
+    };
+
+    close(fd);
+
+    char *content_type = "text/plain"; 
+    char *file_ext = strrchr(file_path, '.');
+    char length_str[20];
+    sprintf(length_str, "%d", (int) file_bytes);
+    
+    if (strcmp(file_ext, ".html") == 0)
+        content_type = "text/html";
+    if (strcmp(file_ext, ".png") == 0)
+        content_type = "image/png";
+    if (strcmp(file_ext, ".jpg") == 0)
+        content_type = "image/jpg";
+    if (strcmp(file_ext, ".ico") == 0)
+        content_type = "image/ico";
+
+    char headers[4096];
+
+    strcat(headers, "HTTP ");
+    strcat(headers, HTTP_VER);
+    strcat(headers, " 200 OK\r\n");
+
+    strcat(headers, "Content-type: ");
+    strcat(headers, content_type);
+    strcat(headers, "\r\n");
+
+    strcat(headers, "Content-length: ");
+    strcat(headers, length_str);
+    strcat(headers, "\r\n\r\n");
+
+    size_t headers_length = strlen(headers);
+
+    *resp_size = (size_t) (headers_length + file_bytes);
+    *resp = malloc(headers_length + file_bytes);
+
+    memcpy(*resp, headers, headers_length);
+    memcpy(*resp + headers_length, file_buf, file_bytes);
+
+    free(file_buf); 
+
+    return 0;
+}
+
 int handle_client(int sockfd) {
-    char buf[BUFSIZE], *resp;
+    char buf[RECV_BUFSIZE];
     int buf_size;
     struct httprequest req;
-
-    memset(&req, 0, sizeof req);
 
     if ((buf_size = recv(sockfd, buf, sizeof buf, 0)) == -1) {
         perror("recv");
@@ -123,21 +240,27 @@ int handle_client(int sockfd) {
         
     buf[buf_size] = '\0';
 
-    // TODO: 200 and 400 response should contain content from a files in /root (400 from special error file)
-    char *get_resp = "HTTP 1.0 200 OK\r\nContext-type: text/html\r\nContent-Length: 48\r\n\r\n<html><body><h1>Hello, world!</h1></body></html>";
-    char *err_resp = "HTTP 1.0 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 77\r\n\r\n{'error':'Bad request','message':'Request body could not be read properly.',}";
-    char *unimpl_resp = "HTTP 1.0 501 Not Implemented";
+    memset(&req, 0, sizeof req);
 
-    if (parse_request(&req, buf, buf_size) == -1)
-        resp = err_resp;
-    else
-        resp = strcmp(req.method, "GET") == 0 ? get_resp : unimpl_resp;
+    httprequest(&req, buf, buf_size);
 
-    if (send(sockfd, resp, strlen(resp), 0) == -1) {
+    void *resp;
+    size_t resp_size;
+    if (httpresponse(&resp, &resp_size, &req) == -1) {
+        free(resp);
+        freehttprequest(&req);
+        perror("httpresponse");
+        return -1;
+    }
+
+    if (send(sockfd, resp, resp_size, 0) == -1) {
+        free(resp);
+        freehttprequest(&req);
         perror("send");
         return -1;
     }
-    
+
+    free(resp);
     freehttprequest(&req);
 
     return 0;
