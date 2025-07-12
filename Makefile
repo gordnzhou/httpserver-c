@@ -1,6 +1,6 @@
 # === Config ===
 TARGET := build/main
-SRCS := main.c
+SRCS := main.c network.c sigchld.c handle_connection.c
 
 # === Auto-Derived ===
 SRC_DIR := src
